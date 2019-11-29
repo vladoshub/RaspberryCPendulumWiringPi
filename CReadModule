@@ -1,0 +1,186 @@
+#include <wiringPi.h>
+#include <stdio.h>
+#include <sys/time.h>
+#include <malloc.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#define countElements 20000
+
+bool StateA, StateB;
+double Time[countElements];//массив с временем
+int Coord[countElements];//массив с координатами
+long Coordinate = 0;//координата
+int count=0;//счетчик в массиве
+struct timeval start;//время от запуска всей программы(не нашел другой метод,поэтому просто будем вычитать это значение из времени полученного при срабатывания прерывания)
+struct timeval timevals[countElements];//массив структуры миллисекунд
+int stopReadFromPipe=100000;//остановка на 1/10 сек для считывания с pipe
+int stopReadFromSensor=100;//остановка на 100микросек для проверки маха маятика
+int countBuf=10;//буфер чтения
+int mahMax=9995;
+
+void timevalToDouble(){//перевод из формата timaval в double
+for(int i=0;i<count;i++)
+Time[i]=(double)(timevals[i].tv_usec - start.tv_usec) / 1000000 + (double)(timevals[i].tv_sec - start.tv_sec);//вычисляем разность времени для каждого тика
+}
+
+void Clear(){
+count=0;
+}
+
+void getCurrentCoordinate(char *readbuffer,int *fd){ //получить текующую координату
+int nbytes;
+Clear();//освобождаем счетчик
+gettimeofday(&start, NULL);
+wiringPiISR(ChannelA, INT_EDGE_BOTH, ISR_AOne);//без использования массивов
+wiringPiISR(ChannelB, INT_EDGE_BOTH, ISR_BOne);
+while ((nbytes = read(fd[0], readbuffer, countBuf)) > 0)
+{
+read(fd[0], readbuffer, countBuf);
+usleep (stopReadFromPipe);//остановка на 1/10 сек
+
+}
+timevalToDouble();//получение времени в double
+close(fd[0]);//закрываем чтение
+char outC[16];
+snprintf(outC, 16, "%d", Coordinate);
+write(fd[1], outC,(strlen(outC)+1));//по нажатию Enter пишем координату Python
+close(fd[1]);//закрываем запись
+}
+
+void saveDataFromSensor(){//считывания данных маха без передачи в Python
+Clear();//освобождаем счетчик
+//start_main = clock();//начальное время
+gettimeofday(&start, NULL);
+wiringPiISR(ChannelA, INT_EDGE_BOTH, ISR_A);
+wiringPiISR(ChannelB, INT_EDGE_BOTH, ISR_B);
+while (Coordinate<mahMax)
+{
+usleep (stopReadFromSensor);//остановка на 50микросек ~20khz при условии того что сенсор~10khz(1 мах за сек)
+}
+timevalToDouble();
+}
+
+void getDataFromSensor(int *fd){ //передаем в Python наши время и координаты
+if(count<1){
+close(fd[0]);//закрываем чтение
+write(fd[1], '0',1));//нечего отправлять
+close(fd[0]);//закрываем чтение
+return;
+}
+char outT[20],outC[16];
+close(fd[0]);//закрываем чтение
+write(fd[1], count, (strlen(count)+1));//передаем размерность массива
+for(int i=0;i<count;i++){
+snprintf(outT, 20, "%f", Time[i]);//преобразуем в char время
+snprintf(outC, 16, "%d", Coord[i]);//преобразуем в char координату
+write(fd[1], outT, (strlen(outT)+1));//отсылаем время 1 тика
+write(fd[1], outC,(strlen(outC)+1));//отсылаем координату 1 тика
+}
+close(fd[1]);//закрываем запись
+Clear();
+}
+
+void readFromPipe(int *fd){ //чтение команд
+pid_t childpid;
+char readbuffer[countBuf];
+
+if((childpid = fork()) == -1)
+{
+perror("fork");
+exit(0);
+}
+
+if(childpid == 1)
+{
+//если доступно для чтения
+close(fd[1]);
+read(fd[0], readbuffer, sizeof(readbuffer));
+if(readbuffer== '1')getCurrentCoordinate(readbuffer,fd);
+if(readbuffer== '2')saveDataFromSensor();
+if(readbuffer== '3')getDataFromSensor(fd);
+if(readbuffer== '4')exit(0);
+else{getCurrentCoordinate(readbuffer,fd);}
+usleep(stopReadFromPipe);// сон после выполнения операция на пол сек
+readFromPipe(fd);//заного читаем
+}
+else
+{
+exit(0);
+}
+
+exit(0);
+}
+
+void ISR_A()
+{
+StateA = !StateA;
+if (State_B != State_A){
+Coordinate++;
+Coord[count]=Coordinate;
+//Time[count]=(double)(clock()-start_main)/CLOCKS_PER_SEC
+gettimeofday(&timevals[count], NULL);//пишем в миллисекундах
+count++;//тик массива
+}
+else {
+Coordinate--;
+Coord[count]=Coordinate;
+gettimeofday(&timevals[count], NULL);
+count++;
+}
+}
+
+void ISR_B()
+{
+StateB = !StateB;
+if (State_B == State_A){
+Coordinate++;
+Coord[count]=Coordinate;
+gettimeofday(&timevals[count], NULL);
+count++;
+}
+else {
+Coordinate--;
+Coord[count]=Coordinate;
+gettimeofday(&timevals[count], NULL);
+count++;
+}
+}
+
+void ISR_AOne()
+{
+StateA = !StateA;
+if (State_B != 
+ 
+State_A){
+Coordinate++;
+}
+else {
+Coordinate--;
+}
+}
+
+void ISR_BOne()
+{
+StateB = !StateB;
+if (State_B == State_A){
+Coordinate++;
+}
+else {
+Coordinate--;
+}
+}
+
+int main()
+{
+int fd[2];
+pipe(fd);
+const int ChannelA = 23;
+const int ChannelB = 24;
+wiringPiSetupGpio (); //BCM mode
+pinMode (ChannelA, INPUT);
+pinMode(ChannelB, INPUT);
+StateA = digitalRead(ChannelA);
+StateB = digitalRead(ChannelB);
+readFromPipe(fd);
+}
