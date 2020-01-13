@@ -105,8 +105,6 @@ case Ready ://ожидание
     }
     else {
     Coordinate--;
-    if(Coordinate<20)
-    typeWork=Write;
     }
 break;
 
@@ -150,8 +148,6 @@ case Ready ://ожидание
     }
     else {
     Coordinate--;
-    if(Coordinate<20)
-    typeWork=Write;
     }
 break;
 
