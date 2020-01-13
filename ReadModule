@@ -1,0 +1,214 @@
+#include <wiringPi.h>
+#include <stdio.h>
+#include <sys/time.h>
+#include <malloc.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#define countElements 20000
+
+
+
+
+
+
+typedef enum {
+    Ready,
+    Write,
+    Pause
+} workType;
+
+
+typedef enum {
+    WaitingUser,
+    Run,
+    Error
+} programState;
+
+
+bool StateA, StateB;
+double Time[countElements];//массив с временем
+int Coord[countElements];//массив с координатами
+long Coordinate = 0;//координата
+int count=0;//счетчик в массиве
+struct timeval start;//время от запуска всей программы(не нашел другой метод,поэтому просто будем вычитать это значение из времени полученного при срабатывания прерывания)
+struct timeval timevals[countElements];//массив структуры миллисекунд
+int stopReadFromPipe=100000;//остановка на 1/10 сек для считывания с pipe
+int stopReadFromSensor=100;//остановка на 100микросек для проверки маха маятика
+int countBuf=10;//буфер чтения
+char readbuffer[countBuf];
+int mahMax=9995;
+enum workType typeWork=Ready;
+enum programState state=WaitingUser; 
+
+void timevalToDouble(){//перевод из формата timaval в double
+for(int i=0;i<count;i++)
+Time[i]=(double)(timevals[i].tv_usec - start.tv_usec) / 1000000 + (double)(timevals[i].tv_sec - start.tv_sec);//вычисляем разность времени для каждого тика
+}
+
+void Clear(){
+
+count=0;
+}
+
+void getCurrentCoordinate(char *readbuffer,int *fd){ //получить текующую координату
+int nbytes;
+char outC[16];
+snprintf(outC, 16, "%d", Coordinate);
+write(fd[1], outC,(strlen(outC)+1));//пишем координату Python
+}
+
+
+void getDataFromSensor(int *fd){ 
+if(count<1){
+return;
+}
+timevalToDouble();
+char outT[20],outC[16];
+write(fd[1], count, (strlen(count)+1));//передаем размерность массива
+for(int i=0;i<count;i++){
+snprintf(outT, 20, "%f", Time[i]);//преобразуем в char время
+snprintf(outC, 16, "%d", Coord[i]);//преобразуем в char координату
+write(fd[1], outT, (strlen(outT)+1));//отсылаем время 1 тика
+write(fd[1], outC,(strlen(outC)+1));//отсылаем координату 1 тика
+}
+Clear();
+}
+
+
+
+void readFromPipe(int *fd){
+read(fd[0], readbuffer, sizeof(readbuffer));
+if(readbuffer== '0'){//получение текущей координаты
+    typeWork=Pause;
+    getCurrentCoordinate(readbuffer,fd);
+    typeWork=Ready;
+}
+if(readbuffer== '1'){
+    Clear();
+    gettimeofday(&start, NULL);
+    typeWork=Work;
+    state=Run;
+}
+if(readbuffer== '2'){
+    typeWork=Pause;
+    getDataFromSensor(fd);
+    typeWork=Ready;
+}
+if(readbuffer== '3')exit(0);
+else{getCurrentCoordinate(readbuffer,fd);}
+usleep(stopReadFromPipe);// сон после выполнения операция на пол сек
+readFromPipe(fd);//заного читаем
+
+}
+
+
+
+
+
+void ISR_A()
+{
+switch(typeWork){
+    
+case Ready ://ожидание
+    StateA = !StateA;
+    if (State_B != State_A){
+    Coordinate++;
+    if(Coordinate>20)
+    typeWork=Write;
+    }
+    else {
+    Coordinate--;
+    if(Coordinate<20)
+    typeWork=Write;
+    }
+break;
+
+case Write ://запись
+    StateA = !StateA;
+    if (State_B != State_A){
+    Coordinate++;
+    Coord[count]=Coordinate;
+    gettimeofday(&timevals[count], NULL);//пишем в миллисекундах
+    count++;//тик массива
+    if(Coordinate<mahMax){ //проверка на отклонение от начанльной точки
+    typeWork=Pause;
+    state=WaitingUser;
+    }
+    }
+    else {
+    Coordinate--;
+    Coord[count]=Coordinate;
+    gettimeofday(&timevals[count], NULL);
+    count++;
+    if(Coordinate<mahMax){ //проверка на отклонение от начанльной точки
+    typeWork=Pause;
+    state=WaitingUser;
+    }
+break;
+}
+
+void ISR_B()
+{
+switch(typeWork){
+
+case Ready ://ожидание
+    StateB = !StateB;
+    if (State_B == State_A){
+    Coordinate++;
+    if(Coordinate>20)
+    typeWork=Write;
+    }
+    else {
+    Coordinate--;
+    if(Coordinate<20)
+    typeWork=Write;
+    }
+break;
+
+case Write ://запись
+    StateB = !StateB;
+    if (State_B == State_A){
+    Coordinate++;
+    Coord[count]=Coordinate;
+    gettimeofday(&timevals[count], NULL);
+    count++;
+    if(Coordinate<mahMax){ //проверка на отклонение от начанльной точки
+    typeWork=Pause;
+    state=WaitingUser;
+    }
+    }
+    else {
+    Coordinate--;
+    Coord[count]=Coordinate;
+    gettimeofday(&timevals[count], NULL);
+    count++;
+    if(Coordinate<mahMax){ //проверка на отклонение от начанльной точки
+    typeWork=Pause;
+    state=WaitingUser;
+    }
+}
+break;
+}
+
+
+}
+
+
+    
+
+
+int main()
+{
+readbuffer='0';//ожидание
+int fd[2];
+pipe(fd);
+const int ChannelA = 23;
+const int ChannelB = 24;
+wiringPiSetupGpio (); //BCM mode
+pinMode (ChannelA, INPUT);
+pinMode(ChannelB, INPUT);
+StateA = digitalRead(ChannelA);
+StateB = digitalRead(ChannelB);
+readFromPipe(fd);
+}
