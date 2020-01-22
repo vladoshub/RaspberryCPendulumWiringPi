@@ -1,5 +1,6 @@
 #include <wiringPi.h>
 #include <stdio.h>
+#include <math.h>
 #include <sys/time.h>
 #include <malloc.h>
 #include <unistd.h>
@@ -20,6 +21,7 @@ typedef enum {
 } programState;
 
 bool StateA, StateB;
+bool Mah=true;
 double Time[countElements];//массив с временем
 int Coord[countElements];//массив с координатами
 long Coordinate = 0;//координата
@@ -30,7 +32,10 @@ int stopReadFromPipe=100000;//остановка на 1/10 сек для счи�
 int stopReadFromSensor=100;//остановка на 100микросек для проверки маха маятика
 int countBuf=10;//буфер чтения
 char readbuffer[countBuf];
+char Channel='o';
 int mahMax=9995;
+int pendPoint=0;//точка начала отчета
+int offsetPointMax=0;//максимально возможное смещение в сторону противоположную перемещению маятника при измерении маха
 enum workType typeWork=Ready;
 enum programState state=WaitingUser; 
 
@@ -70,112 +75,201 @@ Clear();
 void readFromPipe(int *fd){
 read(fd[0], readbuffer, sizeof(readbuffer));
 if(readbuffer== '0'){//получение текущей координаты
-    typeWork=Pause;
     getCurrentCoordinate(readbuffer,fd);
-    typeWork=Ready;
 }
-if(readbuffer== '1'){
+if(readbuffer== '1'){//Запись в буфер маха
     Clear();
     gettimeofday(&start, NULL);
-    typeWork=Work;
+    typeWork=Ready;
     state=Run;
 }
-if(readbuffer== '2'){
+if(readbuffer== '2'){//Отдать данные в систему
     typeWork=Pause;
     getDataFromSensor(fd);
     typeWork=Ready;
 }
-if(readbuffer== '3')exit(0);
+if(readbuffer== '3')exit(0);//Выход
+if(readbuffer== '4'){//Изменение чувствительнсоти
+    offsetPoint=0;//здесь данные с буфера будут
+    offsetPointMax=0;
+}
+if(readbuffer== '5'){//Сброс
+    Clear();
+    Coordinate=0;
+    Channel='o';
+}
 else{getCurrentCoordinate(readbuffer,fd);}
 usleep(stopReadFromPipe);// сон после выполнения операция на пол сек
 readFromPipe(fd);//заного читаем
 
 }
 
-void ISR_A()
+void ISR_A()//прерывание по каналу A
 {
-switch(typeWork){
+switch(typeWork){//смотрим текущее состояние работы
     
-case Ready ://ожидание
+case Ready ://ожидание смещения для записи
     StateA = !StateA;
     if (State_B != State_A){
     Coordinate++;
-    if(Coordinate>20)
-    typeWork=Write;
+    if(abs(Coordinate)>pendPoint)//проверка на смещение относительно начала
+    typeWork=Write;//переход в режим записи
+    Channel='+';//учет направления движения
     }
     else {
     Coordinate--;
+        if(abs(Coordinate)>pendPoint){//переход в режим записи
+        typeWork=Write;
+        Channel='-';
+        }//учет направления движения
     }
 break;
 
-case Write ://запись
+case Write ://запись данных в память
     StateA = !StateA;
-    if (State_B != State_A){
+    if (State_B != State_A){//движение в одну сторону
+    if(Channel=='+'){//если текущее направление движения совпадает с начальным-пишем
     Coordinate++;
-    Coord[count]=Coordinate;
-    gettimeofday(&timevals[count], NULL);//пишем в миллисекундах
-    count++;//тик массива
-    if(Coordinate<mahMax){ //проверка на отклонение от начанльной точки
-    typeWork=Pause;
-    state=WaitingUser;
+    Coord[count]=abs(Coordinate);//коордианта
+    gettimeofday(&timevals[count], NULL);//время
+    count++;//ячейка массива
+    Mah=true;//снимаем фиксацию с offsetPointMax
     }
+    else{//если пошли обратно
+    if(Mah){//если первое отклонение назад
+    offsetPointMax=abs(Coordinate)-offsetPointMax;//записываем начальную коордианту откуда пошло движение назад
+    Mah=false;//фиксируем коордианту откуда пошло движение назад
     }
-    else {
+        if(abs(Coordinate)<=offsetPointMax){//смотрим на сколько сместилось
+        typeWork=Pause;//если да перестаем писать
+        Coordinate++;
+        }
+        else{
+         Coordinate++;// иначеп просто фикс изменяем коордианту
+        }
+
+    
+     }
+    }
+    else {//движение в противоположную сторону
+     if(Channel=='-'){//если текущее направление движения совпадает с начальным-пишем
     Coordinate--;
-    Coord[count]=Coordinate;
+    Coord[count]=abs(Coordinate;)
     gettimeofday(&timevals[count], NULL);
     count++;
-    if(Coordinate<mahMax){ //проверка на отклонение от начанльной точки
-    typeWork=Pause;
-    state=WaitingUser;
+      Mah=true;
+    }
+    else{//иначе пошли обратно
+    if(Mah){//если первое или последовательное отклонение назад
+    offsetPointMax=abs(Coordinate)-offsetPointMax;
+    Mah=false;
+    }
+        if(abs(Coordinate)<=offsetPointMax){
+        typeWork=Pause;
+        Coordinate++;
+        }
+        else{
+         Coordinate++;
+        }
+
+    
+     }
+    
     }
 }
 break;
 
-case Pause :
+case Pause://просто отслеживаем маятик без записи в память
+ StateB = !StateB;
+    if (State_B == State_A)
+    Coordinate++;
+    else {
+    Coordinate--;
+    }
 break;
 
 void ISR_B()
 {
 switch(typeWork){
 
-case Ready ://ожидание
+case Ready ://ожидание сдвига маятника на n тиков 
     StateB = !StateB;
     if (State_B == State_A){
     Coordinate++;
-    if(Coordinate>20)
+    if(abs(Coordinate)>pendPoint)//переход в режим записи
     typeWork=Write;
+    Channel='+';//учет направления движения
     }
     else {
     Coordinate--;
+        if(abs(Coordinate)>pendPoint)//переход в режим записи
+        typeWork=Write;
+        Channel='-';//учет направления движения
     }
 break;
 
-case Write ://запись
+case Write ://запись маха 
     StateB = !StateB;
-    if (State_B == State_A){
+    if (State_B == State_A){//движение в одну сторону
+    if(Channel=='+'){//если текущее направление движения совпадает с начальным-пишем
     Coordinate++;
-    Coord[count]=Coordinate;
+    Coord[count]=abs(Coordinate);
     gettimeofday(&timevals[count], NULL);
     count++;
-    if(Coordinate<mahMax){ //проверка на отклонение от начанльной точки
-    typeWork=Pause;
-    state=WaitingUser;
+    Mah=true;
     }
+    else{//иначе пошли обратно
+    if(Mah){//если первое или последовательное отклонение назад
+    offsetPointMax=abs(Coordinate)-offsetPointMax;
+    Mah=false;
     }
-    else {
+        if(abs(Coordinate)<=offsetPointMax){
+        typeWork=Pause;
+        Coordinate++;
+        }
+        else{
+         Coordinate++;
+        }
+
+    
+     }
+    }
+    else {//движение в противоположную сторону
+     if(Channel=='-'){//если текущее направление движения совпадает с начальным-пишем
     Coordinate--;
-    Coord[count]=Coordinate;
+    Coord[count]=abs(Coordinate);
     gettimeofday(&timevals[count], NULL);
     count++;
-    if(Coordinate<mahMax){ //проверка на отклонение от начанльной точки
-    typeWork=Pause;
-    state=WaitingUser;
+      Mah=true;
     }
-}
+    else{//иначе пошли обратно
+    if(Mah){//если первое или последовательное отклонение назад
+    offsetPointMax=abs(Coordinate)-offsetPointMax;
+    Mah=false;
+    }
+        if(abs(Coordinate)<=offsetPointMax){
+        typeWork=Pause;
+        Coordinate++;
+        }
+        else{
+         Coordinate++;
+        }
+
+    
+     }
+    
+    }
+  
+
 break;
 
-case Pause :
+case Pause ://просто отслеживаем маятик без записи в память
+ StateB = !StateB;
+    if (State_B == State_A)
+    Coordinate++;
+    else {
+    Coordinate--;
+    }
 break;
 }
 
